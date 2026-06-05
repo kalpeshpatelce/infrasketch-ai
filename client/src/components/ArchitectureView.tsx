@@ -309,7 +309,7 @@ function sanitizeMermaidCode(code: string): string {
   });
 
   // Fix style references that might still have dots
-  sanitized = sanitized.replace(/style\s+([^\s]+)/g, (match, nodeId) => {
+  sanitized = sanitized.replace(/style\s+([^\s]+)/g, (_match, nodeId) => {
     return `style ${nodeId.replace(/\./g, "_")}`;
   });
 
