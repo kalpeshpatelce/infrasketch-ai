@@ -7,7 +7,6 @@ import {
   LLM_PROVIDERS,
   LLMProvider,
   getSessionUsage,
-  resetSessionUsage,
   TokenUsage,
 } from "../services/ai-client";
 
