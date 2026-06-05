@@ -5,7 +5,7 @@ export default defineConfig({
   plugins: [react()],
   // For GitHub Pages: set base to repo name
   // Change 'InfraSketch-AI' to your actual repo name if different
-  base: process.env.NODE_ENV === "production" ? "/InfraSketch-AI/" : "/",
+  base: process.env.NODE_ENV === "production" ? "/infrasketch-ai/" : "/",
   server: {
     port: 5173,
   },
