@@ -3,11 +3,19 @@ import { Toaster } from "react-hot-toast";
 import Header from "./components/Header";
 import InputPanel from "./components/InputPanel";
 import CodePreview from "./components/CodePreview";
-import { GenerationResult } from "./services/ai-client";
+import TokenUsageBar from "./components/TokenUsageBar";
+import { GenerationResult, TokenUsage } from "./services/ai-client";
 
 function App() {
   const [result, setResult] = useState<GenerationResult | null>(null);
   const [isLoading, setIsLoading] = useState(false);
+  const [sessionUsage, setSessionUsage] = useState<TokenUsage>({ inputTokens: 0, outputTokens: 0, totalTokens: 0 });
+  const [lastRequestUsage, setLastRequestUsage] = useState<TokenUsage | null>(null);
+
+  const handleResult = (newResult: GenerationResult) => {
+    setResult(newResult);
+    setLastRequestUsage(newResult.tokenUsage);
+  };
 
   return (
     <div className="min-h-screen bg-gray-900 flex flex-col">
@@ -18,9 +26,10 @@ function App() {
         {/* Left Panel - Input */}
         <div className="w-full lg:w-2/5">
           <InputPanel
-            onResult={setResult}
+            onResult={handleResult}
             isLoading={isLoading}
             setIsLoading={setIsLoading}
+            onTokenUpdate={setSessionUsage}
           />
         </div>
 
@@ -30,10 +39,14 @@ function App() {
         </div>
       </main>
 
+      {/* Token Usage Bar */}
+      <TokenUsageBar usage={sessionUsage} lastRequestUsage={lastRequestUsage} />
+
       {/* Footer */}
       <footer className="bg-gray-800 border-t border-gray-700 px-6 py-3 text-center">
         <p className="text-xs text-gray-500">
-          InfraSketch AI — Powered by GitHub Models (GPT-4.1) • All processing happens in your browser • No data stored on any server
+          InfraSketch AI — Supports GitHub Models, OpenAI, Groq, Together AI, OpenRouter, Anthropic •
+          All processing in your browser • Keys stored in session only
         </p>
       </footer>
     </div>

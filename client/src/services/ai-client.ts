@@ -1,13 +1,130 @@
 /**
- * Client-side AI service that calls GitHub Models API directly.
- * This eliminates the need for a backend server.
- * 
- * SECURITY NOTE: The API token is entered by the user at runtime,
- * never stored in the source code or committed to git.
+ * Client-side AI service supporting multiple LLM providers.
+ * Calls APIs directly from the browser — no backend needed.
+ *
+ * SECURITY: API keys are entered by the user at runtime and stored
+ * only in sessionStorage (cleared when browser tab closes).
+ * Never committed to source code.
  */
 
-const GITHUB_MODELS_URL = "https://models.inference.ai.azure.com/chat/completions";
-const MODEL = "gpt-4.1";
+// ─── Provider Definitions ───────────────────────────────────────────────────
+
+export interface LLMProvider {
+  id: string;
+  name: string;
+  models: string[];
+  defaultModel: string;
+  baseUrl: string;
+  authHeader: (token: string) => Record<string, string>;
+  docUrl: string;
+  tokenNote: string;
+}
+
+export const LLM_PROVIDERS: LLMProvider[] = [
+  {
+    id: "github",
+    name: "GitHub Models",
+    models: ["gpt-4.1", "gpt-4o", "gpt-4.1-mini", "gpt-4o-mini", "DeepSeek-R1"],
+    defaultModel: "gpt-4.1",
+    baseUrl: "https://models.inference.ai.azure.com/chat/completions",
+    authHeader: (token) => ({ Authorization: `Bearer ${token}` }),
+    docUrl: "https://github.com/settings/tokens",
+    tokenNote: "Create a Fine-grained PAT with 'models:read' permission",
+  },
+  {
+    id: "openai",
+    name: "OpenAI",
+    models: ["gpt-4.1", "gpt-4o", "gpt-4o-mini", "gpt-4.1-mini", "o3-mini"],
+    defaultModel: "gpt-4.1",
+    baseUrl: "https://api.openai.com/v1/chat/completions",
+    authHeader: (token) => ({ Authorization: `Bearer ${token}` }),
+    docUrl: "https://platform.openai.com/api-keys",
+    tokenNote: "Create an API key at platform.openai.com",
+  },
+  {
+    id: "groq",
+    name: "Groq",
+    models: ["llama-3.3-70b-versatile", "llama-3.1-8b-instant", "mixtral-8x7b-32768", "gemma2-9b-it"],
+    defaultModel: "llama-3.3-70b-versatile",
+    baseUrl: "https://api.groq.com/openai/v1/chat/completions",
+    authHeader: (token) => ({ Authorization: `Bearer ${token}` }),
+    docUrl: "https://console.groq.com/keys",
+    tokenNote: "Free tier available. Create key at console.groq.com",
+  },
+  {
+    id: "together",
+    name: "Together AI",
+    models: ["meta-llama/Llama-3.3-70B-Instruct-Turbo", "Qwen/Qwen2.5-72B-Instruct-Turbo", "deepseek-ai/DeepSeek-R1-Distill-Llama-70B"],
+    defaultModel: "meta-llama/Llama-3.3-70B-Instruct-Turbo",
+    baseUrl: "https://api.together.xyz/v1/chat/completions",
+    authHeader: (token) => ({ Authorization: `Bearer ${token}` }),
+    docUrl: "https://api.together.xyz/settings/api-keys",
+    tokenNote: "$25 free credits on signup. Create key at together.xyz",
+  },
+  {
+    id: "openrouter",
+    name: "OpenRouter",
+    models: ["openai/gpt-4.1", "anthropic/claude-sonnet-4", "google/gemini-2.5-flash", "meta-llama/llama-3.3-70b-instruct"],
+    defaultModel: "openai/gpt-4.1",
+    baseUrl: "https://openrouter.ai/api/v1/chat/completions",
+    authHeader: (token) => ({ Authorization: `Bearer ${token}` }),
+    docUrl: "https://openrouter.ai/keys",
+    tokenNote: "Aggregator for 200+ models. Free credits available.",
+  },
+  {
+    id: "anthropic",
+    name: "Anthropic (Claude)",
+    models: ["claude-sonnet-4-20250514", "claude-haiku-4-20250414"],
+    defaultModel: "claude-sonnet-4-20250514",
+    baseUrl: "https://api.anthropic.com/v1/messages",
+    authHeader: (token) => ({ "x-api-key": token, "anthropic-version": "2023-06-01", "anthropic-dangerous-direct-browser-access": "true" }),
+    docUrl: "https://console.anthropic.com/settings/keys",
+    tokenNote: "Create API key at console.anthropic.com",
+  },
+];
+
+// ─── Token Usage Tracking ───────────────────────────────────────────────────
+
+export interface TokenUsage {
+  inputTokens: number;
+  outputTokens: number;
+  totalTokens: number;
+}
+
+export interface SessionTokenUsage {
+  perRequest: TokenUsage[];
+  total: TokenUsage;
+}
+
+let sessionUsage: SessionTokenUsage = {
+  perRequest: [],
+  total: { inputTokens: 0, outputTokens: 0, totalTokens: 0 },
+};
+
+export function getSessionUsage(): SessionTokenUsage {
+  return sessionUsage;
+}
+
+export function resetSessionUsage(): void {
+  sessionUsage = {
+    perRequest: [],
+    total: { inputTokens: 0, outputTokens: 0, totalTokens: 0 },
+  };
+}
+
+function trackUsage(usage: TokenUsage): void {
+  sessionUsage.perRequest.push(usage);
+  sessionUsage.total.inputTokens += usage.inputTokens;
+  sessionUsage.total.outputTokens += usage.outputTokens;
+  sessionUsage.total.totalTokens += usage.totalTokens;
+}
+
+// Rough token estimation when API doesn't return usage stats
+function estimateTokens(text: string): number {
+  return Math.ceil(text.length / 4);
+}
+
+// ─── Main Types ─────────────────────────────────────────────────────────────
 
 export interface GeneratedFiles {
   terraform?: string;
@@ -28,27 +145,36 @@ export interface GenerationResult {
   files: GeneratedFiles;
   validation: ValidationItem[];
   message: string;
+  tokenUsage: TokenUsage;
 }
 
-/**
- * Generate IaC code by calling GitHub Models API directly from the browser.
- */
+// ─── Main Generation Function ───────────────────────────────────────────────
+
 export async function generateIaC(
   description: string,
   outputType: "terraform" | "ansible" | "both",
   provider: "aws" | "azure" | "gcp",
-  token: string
+  token: string,
+  llmProvider: LLMProvider,
+  model: string
 ): Promise<GenerationResult> {
   const files: GeneratedFiles = {};
+  let requestUsage: TokenUsage = { inputTokens: 0, outputTokens: 0, totalTokens: 0 };
 
   if (outputType === "terraform" || outputType === "both") {
-    files.terraform = await callAI(getTerraformSystemPrompt(), getTerraformUserPrompt(description, provider), token);
-    files.terraform = stripCodeFences(files.terraform);
+    const result = await callAI(getTerraformSystemPrompt(), getTerraformUserPrompt(description, provider), token, llmProvider, model);
+    files.terraform = stripCodeFences(result.content);
+    requestUsage.inputTokens += result.usage.inputTokens;
+    requestUsage.outputTokens += result.usage.outputTokens;
+    requestUsage.totalTokens += result.usage.totalTokens;
   }
 
   if (outputType === "ansible" || outputType === "both") {
-    files.ansible = await callAI(getAnsibleSystemPrompt(), getAnsibleUserPrompt(description, provider), token);
-    files.ansible = stripCodeFences(files.ansible);
+    const result = await callAI(getAnsibleSystemPrompt(), getAnsibleUserPrompt(description, provider), token, llmProvider, model);
+    files.ansible = stripCodeFences(result.content);
+    requestUsage.inputTokens += result.usage.inputTokens;
+    requestUsage.outputTokens += result.usage.outputTokens;
+    requestUsage.totalTokens += result.usage.totalTokens;
   }
 
   // Generate architecture
@@ -57,13 +183,22 @@ export async function generateIaC(
     : files.ansible
     ? files.ansible.substring(0, 4000)
     : "";
-  files.architecture = await callAI(
+  const archResult = await callAI(
     getArchitectureSystemPrompt(),
     getArchitectureUserPrompt(description, provider, codeContext),
-    token
+    token,
+    llmProvider,
+    model
   );
+  files.architecture = archResult.content;
+  requestUsage.inputTokens += archResult.usage.inputTokens;
+  requestUsage.outputTokens += archResult.usage.outputTokens;
+  requestUsage.totalTokens += archResult.usage.totalTokens;
 
   files.readme = generateReadme(description, outputType, provider);
+
+  // Track this generation's total usage
+  trackUsage(requestUsage);
 
   // Validate
   const validation: ValidationItem[] = [];
@@ -79,18 +214,38 @@ export async function generateIaC(
     files,
     validation,
     message: "Code generated successfully",
+    tokenUsage: requestUsage,
   };
 }
 
-async function callAI(systemPrompt: string, userPrompt: string, token: string): Promise<string> {
-  const response = await fetch(GITHUB_MODELS_URL, {
+// ─── API Call ───────────────────────────────────────────────────────────────
+
+interface AIResponse {
+  content: string;
+  usage: TokenUsage;
+}
+
+async function callAI(
+  systemPrompt: string,
+  userPrompt: string,
+  token: string,
+  provider: LLMProvider,
+  model: string
+): Promise<AIResponse> {
+  // Anthropic has a different API format
+  if (provider.id === "anthropic") {
+    return callAnthropic(systemPrompt, userPrompt, token, model);
+  }
+
+  // OpenAI-compatible API format (GitHub, OpenAI, Groq, Together, OpenRouter)
+  const response = await fetch(provider.baseUrl, {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
-      "Authorization": `Bearer ${token}`,
+      ...provider.authHeader(token),
     },
     body: JSON.stringify({
-      model: MODEL,
+      model,
       messages: [
         { role: "system", content: systemPrompt },
         { role: "user", content: userPrompt },
@@ -102,12 +257,64 @@ async function callAI(systemPrompt: string, userPrompt: string, token: string): 
 
   if (!response.ok) {
     const err = await response.json().catch(() => ({}));
-    throw new Error(err.error?.message || `API error: ${response.status} ${response.statusText}`);
+    const msg = err.error?.message || err.message || `API error: ${response.status} ${response.statusText}`;
+    throw new Error(msg);
   }
 
   const data = await response.json();
-  return data.choices?.[0]?.message?.content || "";
+  const content = data.choices?.[0]?.message?.content || "";
+
+  // Extract token usage from response
+  const usage: TokenUsage = {
+    inputTokens: data.usage?.prompt_tokens || estimateTokens(systemPrompt + userPrompt),
+    outputTokens: data.usage?.completion_tokens || estimateTokens(content),
+    totalTokens: data.usage?.total_tokens || estimateTokens(systemPrompt + userPrompt + content),
+  };
+
+  return { content, usage };
 }
+
+async function callAnthropic(
+  systemPrompt: string,
+  userPrompt: string,
+  token: string,
+  model: string
+): Promise<AIResponse> {
+  const provider = LLM_PROVIDERS.find((p) => p.id === "anthropic")!;
+
+  const response = await fetch(provider.baseUrl, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      ...provider.authHeader(token),
+    },
+    body: JSON.stringify({
+      model,
+      max_tokens: 8000,
+      system: systemPrompt,
+      messages: [{ role: "user", content: userPrompt }],
+    }),
+  });
+
+  if (!response.ok) {
+    const err = await response.json().catch(() => ({}));
+    const msg = err.error?.message || `Anthropic API error: ${response.status}`;
+    throw new Error(msg);
+  }
+
+  const data = await response.json();
+  const content = data.content?.[0]?.text || "";
+
+  const usage: TokenUsage = {
+    inputTokens: data.usage?.input_tokens || estimateTokens(systemPrompt + userPrompt),
+    outputTokens: data.usage?.output_tokens || estimateTokens(content),
+    totalTokens: (data.usage?.input_tokens || 0) + (data.usage?.output_tokens || 0) || estimateTokens(systemPrompt + userPrompt + content),
+  };
+
+  return { content, usage };
+}
+
+// ─── Utilities ──────────────────────────────────────────────────────────────
 
 function stripCodeFences(code: string): string {
   let cleaned = code.trim();
@@ -116,7 +323,7 @@ function stripCodeFences(code: string): string {
   return cleaned.trim();
 }
 
-// --- Terraform Prompts ---
+// ─── Prompt Functions (unchanged) ───────────────────────────────────────────
 
 function getTerraformSystemPrompt(): string {
   return `You are a senior cloud architect and Terraform expert with 10+ years of production experience. You generate PRODUCTION-READY Terraform HCL code that follows cloud architecture best practices.
@@ -158,8 +365,6 @@ ${archRules}
 Generate a SINGLE complete Terraform configuration file.`;
 }
 
-// --- Ansible Prompts ---
-
 function getAnsibleSystemPrompt(): string {
   return `You are a senior DevOps engineer and Ansible expert with 10+ years of production experience. You generate PRODUCTION-READY Ansible playbooks.
 
@@ -196,8 +401,6 @@ Requirements:
 
 Generate a complete Ansible playbook as valid YAML.`;
 }
-
-// --- Architecture Prompts ---
 
 function getArchitectureSystemPrompt(): string {
   return `You are a cloud architecture documentation expert. Generate a comprehensive architecture document with THREE sections.
@@ -263,8 +466,6 @@ Description: ${description}
 ${codeContext ? `Generated code for reference:\n${codeContext}` : ""}`;
 }
 
-// --- Architecture Rules ---
-
 function getArchitectureRules(provider: string): string {
   if (provider === "aws") {
     return `## MANDATORY AWS Architecture Rules:
@@ -309,7 +510,7 @@ function getArchitectureRules(provider: string): string {
   return "";
 }
 
-// --- Validators ---
+// ─── Validators ─────────────────────────────────────────────────────────────
 
 function validateTerraform(code: string): { valid: boolean; errors: string[]; warnings: string[] } {
   const errors: string[] = [];
@@ -339,8 +540,6 @@ function validateAnsible(code: string): { valid: boolean; errors: string[]; warn
 
   return { valid: errors.length === 0, errors, warnings };
 }
-
-// --- README Generator ---
 
 function generateReadme(description: string, outputType: string, provider: string): string {
   const providerName = provider === "aws" ? "AWS" : provider === "azure" ? "Azure" : "Google Cloud";
